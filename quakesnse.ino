@@ -4,15 +4,18 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <LiquidCrystal_I2C.h>
 
 // ============================================================
 // SENSOR PIN DEFINITIONS
 // ============================================================
 #define LIS3DH_CS 15 
-#define BUZZER_PIN 14 
+#define BUZZER_PIN 14
 #define RGB_RED_PIN 13   
 #define RGB_GREEN_PIN 12
-#define SOUND_SENSOR_PIN 34  
+#define SOUND_SENSOR_PIN 34
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // ============================================================
 // WiFi CREDENTIALS
@@ -26,11 +29,11 @@ Adafruit_LIS3DH lis = Adafruit_LIS3DH(LIS3DH_CS);
 // ============================================================
 // DETECTION THRESHOLDS & LOGIC
 // ============================================================
-float SHAKE_THRESHOLD_MS2 = 0.8;      // Sensitivity
+float SHAKE_THRESHOLD_MS2 = 0.7;      // Sensitivity
 int SOUND_THRESHOLD = 2000;           // Sound limit
 
 // --- NEW LOGIC VARIABLES FOR CONTINUOUS DETECTION ---
-const unsigned long MIN_SHAKE_DURATION = 350; // ms
+const unsigned long MIN_SHAKE_DURATION = 250; // ms
 const unsigned long SHAKE_RESET_TIMEOUT = 150; // ms
 
 unsigned long shakeStartTime = 0;     
@@ -56,13 +59,19 @@ int baselineSound = 0;
 unsigned long lastSoundSpikeTime = 0;
 
 // ============================================================
-// DATA STRUCTURE
+// DATA STRUCTURE (Enhanced for 18-feature AI model)
 // ============================================================
 struct SeismicEvent {
   float horizontalAccel;
   float totalAccel;
+  float verticalAccel;       // NEW: Z-axis component
+  float xAccel;              // NEW: X-axis component
+  float yAccel;              // NEW: Y-axis component
+  float zAccel;              // NEW: Z-axis component (same as vertical)
+  float peakGroundAccel;     // NEW: Peak acceleration
   int soundLevel;
   bool isSoundCorrelated;
+  unsigned long durationMs;  // NEW: Event duration
   unsigned long timestamp;
 };
 
@@ -80,6 +89,8 @@ void connectWiFi();
 void setup() {
   Serial.begin(115200);
   while (!Serial) delay(10); 
+  lcd.init();
+  lcd.backlight();
 
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(RGB_RED_PIN, OUTPUT);
@@ -111,6 +122,7 @@ void setup() {
   calibrateSoundSensor();
   
   Serial.println("\n>>> SYSTEM ARMED <<<");
+  displayReport("QuakeSense", "System Armed");
 }
 
 // ============================================================
@@ -140,24 +152,44 @@ void loop() {
     if (!potentialEarthquake) {
       shakeStartTime = millis();
       potentialEarthquake = true;
+      displayReport("Vibration", "Analyzing...");
       Serial.println("-> Vibration detected... analyzing duration.");
     }
 
     if (potentialEarthquake && (millis() - shakeStartTime > MIN_SHAKE_DURATION)) {
-      
+
       unsigned long timeSinceSound = millis() - lastSoundSpikeTime;
       bool soundCorrelated = (timeSinceSound < SOUND_CORRELATION_WINDOW);
+      unsigned long duration = millis() - shakeStartTime;
 
-      SeismicEvent seismicEvent = {horizontalAccel, totalAccel, currentSoundLevel, soundCorrelated, millis()};
+      // Calculate peak ground acceleration (max of total)
+      float peakAccel = max(totalAccel, (float)(horizontalAccel * 1.2f));
+
+      SeismicEvent seismicEvent = {
+        horizontalAccel,     // horizontal_accel
+        totalAccel,          // total_accel
+        dynZ,                // vertical_accel (Z-axis)
+        dynX,                // x_accel
+        dynY,                // y_accel
+        dynZ,                // z_accel (same as vertical)
+        peakAccel,           // peak_ground_acceleration
+        currentSoundLevel,   // sound_level
+        soundCorrelated,     // sound_correlated
+        duration,            // duration_ms
+        millis()             // timestamp
+      };
 
       if (soundCorrelated) {
         Serial.println("⚠️ Heavy Vibration ignored (Sound Correlated)");
+        displayReport("Vibration", "Ignored (Sound)");
         potentialEarthquake = false; 
         shakeStartTime = 0;          
         sendEventToServer(seismicEvent); 
         delay(1000); 
       } else {
         Serial.println("\n🚨 EARTHQUAKE DETECTED! (Continuous P-Wave) 🚨");
+        displayReport("!! EARTHQUAKE !!", "TA:");
+        lcd.print(totalAccel, 2);
         alarmEndTime = millis() + ALARM_DURATION;
         sendEventToServer(seismicEvent);
         potentialEarthquake = false; 
@@ -171,18 +203,22 @@ void loop() {
       shakeStartTime = 0;
     }
   }
+  static bool wasInAlarm = false;
 
   // Alarm Handler
   if (millis() < alarmEndTime) {
     if (millis() - lastBlinkTime >= BLINK_INTERVAL) {
       lastBlinkTime = millis();
       blinkState = !blinkState;
+      wasInAlarm = true;
       if (blinkState) {
         tone(BUZZER_PIN, 2000);
         digitalWrite(RGB_RED_PIN, HIGH);
         digitalWrite(RGB_GREEN_PIN, LOW);
       } else {
         noTone(BUZZER_PIN);
+        wasInAlarm = false;
+        displayReport("Status:", "Safe");
         digitalWrite(RGB_RED_PIN, LOW);
         digitalWrite(RGB_GREEN_PIN, LOW);
       }
@@ -236,13 +272,24 @@ void sendEventToServer(SeismicEvent event) {
     HTTPClient http;
     http.begin(serverUrl);
     http.addHeader("Content-Type", "application/json");
-    StaticJsonDocument<256> doc;
+    StaticJsonDocument<512> doc;  // Increased size for more fields
+
+    // Original 6 features
     doc["horizontal_accel"] = event.horizontalAccel;
-    doc["total_accel"] = event.totalAccel;  // Added missing field
+    doc["total_accel"] = event.totalAccel;
     doc["sound_level"] = event.soundLevel;
     doc["sound_correlated"] = event.isSoundCorrelated;
     doc["timestamp"] = event.timestamp;
-    doc["device_id"] = "ESP32_QuakeSense_001";  // Added missing field
+    doc["device_id"] = "ESP32_QuakeSense_001";
+
+    // NEW: Additional features for 18-feature model
+    doc["vertical_accel"] = event.verticalAccel;
+    doc["x_accel"] = event.xAccel;
+    doc["y_accel"] = event.yAccel;
+    doc["z_accel"] = event.zAccel;
+    doc["peak_ground_acceleration"] = event.peakGroundAccel;
+    doc["duration_ms"] = event.durationMs;
+
     String jsonPayload;
     serializeJson(doc, jsonPayload);
     int httpResponseCode = http.POST(jsonPayload);
@@ -264,6 +311,16 @@ void sendEventToServer(SeismicEvent event) {
   } else {
     Serial.println("✗ WiFi not connected, cannot send data");
   }
+}
+
+void displayReport(const char* line1, const char* line2) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+
+  lcd.print(line1);
+
+  lcd.setCursor(0, 1);
+  lcd.print(line2);
 }
 
 void checkSerialInput() {

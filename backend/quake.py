@@ -10,6 +10,12 @@ from collections import deque
 import json
 import time
 
+# Database manager for persistent storage
+from database.db_manager import DatabaseManager
+
+# Enhanced ML feature extraction
+from ml.feature_extractor import FeatureExtractor
+
 app = Flask(__name__)
 CORS(app)
 
@@ -32,8 +38,18 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessag
 # ============================================================
 # DATA STORAGE
 # ============================================================
-ALERT_HISTORY = deque(maxlen=100)  # Store last 100 events
-HISTORICAL_DATA = deque(maxlen=1000)  # For AI training
+# Initialize database manager for persistent storage
+# This replaces in-memory deques (data now survives restarts!)
+try:
+    db = DatabaseManager()
+    print("[OK] Database initialized for persistent event storage")
+except Exception as e:
+    print(f"[WARNING] Database initialization failed: {e}")
+    print("   Falling back to in-memory storage (data will be lost on restart)")
+    db = None
+    # Fallback to in-memory storage if database fails
+    ALERT_HISTORY = deque(maxlen=100)
+    HISTORICAL_DATA = deque(maxlen=1000)
 
 # ============================================================
 # AI MODEL CONFIGURATION
@@ -41,70 +57,75 @@ HISTORICAL_DATA = deque(maxlen=1000)  # For AI training
 class SeismicAIClassifier:
     """
     AI Model for classifying seismic events vs false alarms
-    Uses Isolation Forest for anomaly detection
+    Uses Isolation Forest for anomaly detection with 18 enhanced features
     """
-    
+
     def __init__(self):
         self.model = None
         self.is_trained = False
-        self.feature_history = []
+        self.feature_extractor = FeatureExtractor()  # NEW: 18-feature extraction
         self.load_or_initialize_model()
     
     def load_or_initialize_model(self):
         """Load existing model or create new one"""
-        model_path = "models/seismic_model.pkl"
-        
+        # Try to load the new Random Forest model first
+        rf_model_path = "models/seismic_model_rf.pkl"
+        old_model_path = "models/seismic_model.pkl"
+
         # Create models directory if it doesn't exist
         os.makedirs("models", exist_ok=True)
-        
-        if os.path.exists(model_path):
+
+        # Try Random Forest model first (preferred)
+        if os.path.exists(rf_model_path):
             try:
-                self.model = joblib.load(model_path)
+                self.model = joblib.load(rf_model_path)
                 self.is_trained = True
-                print("✓ AI Model loaded successfully")
+                self.model_type = 'random_forest'
+                print("[OK] Random Forest model loaded successfully (18-feature enhanced)")
             except Exception as e:
-                print(f"⚠️  Error loading model: {e}")
-                self._initialize_new_model()
+                print(f"[WARNING] Error loading Random Forest model: {e}")
+                self._try_load_old_model(old_model_path)
+        elif os.path.exists(old_model_path):
+            self._try_load_old_model(old_model_path)
         else:
             self._initialize_new_model()
-    
+
+    def _try_load_old_model(self, old_model_path):
+        """Try to load old Isolation Forest model as fallback"""
+        try:
+            self.model = joblib.load(old_model_path)
+            self.is_trained = True
+            self.model_type = 'isolation_forest'
+            print("[OK] Isolation Forest model loaded (fallback)")
+        except Exception as e:
+            print(f"[WARNING] Error loading old model: {e}")
+            self._initialize_new_model()
+
     def _initialize_new_model(self):
-        """Initialize a new Isolation Forest model"""
+        """Initialize a new Isolation Forest model (fallback)"""
+        from sklearn.ensemble import IsolationForest
         self.model = IsolationForest(
-            contamination=0.1,  # Expect 10% of data to be anomalies
+            contamination=0.1,
             random_state=42,
             n_estimators=100
         )
-        print("✓ New AI Model initialized")
+        self.model_type = 'isolation_forest'
+        print("[OK] New Isolation Forest model initialized (train with data for better accuracy)")
     
     def extract_features(self, event_data):
         """
-        Extract features from seismic event for AI analysis
-        
-        Features:
-        - Horizontal acceleration magnitude
-        - Total acceleration magnitude
-        - Sound level
-        - Acceleration to sound ratio (key discriminator!)
-        - Rate of change (if we have historical data)
+        Extract 18 enhanced features from seismic event for AI analysis
+
+        Features (18 total):
+        - Original 6: horizontal_accel, total_accel, sound_level, accel-to-sound ratio,
+                      sound_correlated, rate_of_change
+        - NEW 12: acceleration components (4), frequency domain (3), temporal (3), wave detection (2)
+
+        Returns:
+            numpy array of 18 features
         """
-        features = [
-            event_data['horizontal_accel'],
-            event_data['total_accel'],
-            event_data['sound_level'],
-            # Ratio: high accel + low sound = likely earthquake
-            event_data['horizontal_accel'] / max(event_data['sound_level'], 1),
-            1 if event_data['sound_correlated'] else 0
-        ]
-        
-        # Add temporal features if we have history
-        if len(self.feature_history) > 0:
-            recent = self.feature_history[-1]
-            features.append(event_data['horizontal_accel'] - recent[0])  # Rate of change
-        else:
-            features.append(0)
-        
-        return features
+        features = self.feature_extractor.extract_all_features(event_data)
+        return features.tolist()  # Convert numpy array to list for compatibility
     
     def predict(self, event_data):
         """
@@ -125,36 +146,69 @@ class SeismicAIClassifier:
                 'reasoning': 'Strong sound correlation indicates external impact/noise',
                 'features': features
             }
+
+        # TEMPORARY: Heuristic override for real ESP32 data
+        # Until we retrain with actual sensor readings
+        horizontal = event_data.get('horizontal_accel', 0)
+        duration = event_data.get('duration_ms', 0)
+        sound = event_data.get('sound_level', 0)
+
+        # Strong shake: high accel + sustained duration + low sound = likely earthquake
+        if horizontal > 1.5 and duration > 250 and sound < 2500 and not event_data.get('sound_correlated', False):
+            return {
+                'classification': 'genuine_earthquake',
+                'confidence': 0.85,
+                'reasoning': 'Heuristic: High sustained acceleration without sound correlation (ESP32 calibrated)',
+                'features': features
+            }
         
-        if not self.is_trained or len(self.feature_history) < 10:
-            # Not enough data for AI - use heuristics
+        if not self.is_trained:
+            # Model not trained - use heuristics
             if event_data['horizontal_accel'] > 3.0 and not event_data['sound_correlated']:
                 classification = 'genuine_earthquake'
                 confidence = 0.75
-                reasoning = 'High horizontal acceleration without sound (heuristic)'
+                reasoning = 'High horizontal acceleration without sound (heuristic - model not loaded)'
             else:
                 classification = 'uncertain'
                 confidence = 0.5
-                reasoning = 'Insufficient training data for AI classification'
+                reasoning = 'Model not loaded - using basic heuristics'
         else:
             # Use AI model
             prediction = self.model.predict([features])[0]
-            score = self.model.score_samples([features])[0]
-            
-            # Isolation Forest: -1 = anomaly (earthquake), 1 = normal (false alarm)
-            if prediction == -1:
-                classification = 'genuine_earthquake'
-                confidence = min(abs(score) * 0.5 + 0.5, 0.95)
-                reasoning = 'AI detected anomalous seismic pattern'
+
+            # Handle different model types
+            if hasattr(self, 'model_type') and self.model_type == 'random_forest':
+                # Random Forest: 1 = genuine, 0 = false alarm
+                if prediction == 1:
+                    classification = 'genuine_earthquake'
+                    # Get probability if available
+                    if hasattr(self.model, 'predict_proba'):
+                        proba = self.model.predict_proba([features])[0]
+                        confidence = float(max(proba))
+                    else:
+                        confidence = 0.90
+                    reasoning = 'Random Forest AI: Genuine earthquake pattern detected (18-feature model)'
+                else:
+                    classification = 'false_alarm'
+                    if hasattr(self.model, 'predict_proba'):
+                        proba = self.model.predict_proba([features])[0]
+                        confidence = float(max(proba))
+                    else:
+                        confidence = 0.90
+                    reasoning = 'Random Forest AI: False alarm pattern detected'
             else:
-                classification = 'false_alarm'
-                confidence = min(abs(score) * 0.5 + 0.5, 0.95)
-                reasoning = 'AI classified as normal vibration pattern'
-        
-        # Store features for future predictions
-        self.feature_history.append(features)
-        if len(self.feature_history) > 50:
-            self.feature_history.pop(0)
+                # Isolation Forest (fallback): -1 = anomaly (earthquake), 1 = normal (false alarm)
+                score = self.model.score_samples([features])[0]
+                if prediction == -1:
+                    classification = 'genuine_earthquake'
+                    confidence = min(abs(score) * 0.5 + 0.5, 0.95)
+                    reasoning = 'Isolation Forest: Anomalous seismic pattern'
+                else:
+                    classification = 'false_alarm'
+                    confidence = min(abs(score) * 0.5 + 0.5, 0.95)
+                    reasoning = 'Isolation Forest: Normal vibration pattern'
+
+        # Feature history is now managed by FeatureExtractor internally
         
         return {
             'classification': classification,
@@ -255,7 +309,7 @@ def send_telegram_alert(event_data, severity, ai_result):
     # Build message with Markdown formatting
     message = f"{severity_emoji.get(severity, '⚠️')} *SEISMIC ALERT*\n"
     message += f"*Severity:* {severity.upper()}\n\n"
-    
+
     # Event details
     message += f"📍 *Device:* `{event_data['device_id']}`\n"
     message += f"📊 *Horizontal Accel:* `{event_data['horizontal_accel']:.2f} m/s²`\n"
@@ -386,42 +440,72 @@ def receive_seismic_event():
         data['ai_classification'] = ai_result['classification']
         data['ai_confidence'] = ai_result['confidence']
         data['ai_reasoning'] = ai_result['reasoning']
-        
-        # Store in history
-        ALERT_HISTORY.append(data)
-        HISTORICAL_DATA.append(data)
+
+        # Calculate severity (needed for database and Telegram)
+        severity = calculate_severity(data)
+
+        # Store in database (persistent) or fallback to in-memory
+        if db:
+            try:
+                event_id = db.insert_event(data, ai_result, severity)
+                # Update device last seen timestamp
+                db.update_device_last_seen(data['device_id'])
+            except Exception as db_error:
+                print(f"[WARNING] Database insert failed: {db_error}")
+                event_id = -1
+                # Fallback to in-memory if database fails
+                if 'ALERT_HISTORY' in globals():
+                    ALERT_HISTORY.append(data)
+                    HISTORICAL_DATA.append(data)
+        else:
+            # Using in-memory storage
+            ALERT_HISTORY.append(data)
+            HISTORICAL_DATA.append(data)
+            event_id = len(ALERT_HISTORY)
         
         # Log event
         print(f"\n{'='*60}")
-        print(f"🌍 SEISMIC EVENT RECEIVED")
+        print(f"[SEISMIC EVENT RECEIVED]")
         print(f"{'='*60}")
         print(f"Device ID: {data['device_id']}")
         print(f"Horizontal Accel: {data['horizontal_accel']:.2f} m/s²")
         print(f"Total Accel: {data['total_accel']:.2f} m/s²")
         print(f"Sound Level: {data['sound_level']}")
         print(f"Sound Correlated: {data['sound_correlated']}")
-        print(f"\n🤖 AI ANALYSIS:")
+        print(f"\n[AI ANALYSIS]")
         print(f"Classification: {ai_result['classification'].upper()}")
         print(f"Confidence: {ai_result['confidence']*100:.1f}%")
         print(f"Reasoning: {ai_result['reasoning']}")
+        print(f"Severity: {severity}")
+
+        # DEBUG: Show extracted features
+        if 'features' in ai_result:
+            print(f"\n[DEBUG] Extracted 18 features:")
+            feature_names = [
+                'horizontal_accel', 'total_accel', 'sound_level', 'accel_sound_ratio',
+                'sound_correlated', 'rate_of_change', 'vertical_accel', 'x_accel',
+                'y_accel', 'z_accel', 'peak_ground_accel', 'frequency_dominant',
+                'frequency_mean', 'duration_ms', 'wave_arrival_pattern',
+                'p_wave_detected', 's_wave_detected', 'temporal_variance'
+            ]
+            for i, (name, value) in enumerate(zip(feature_names, ai_result['features'][:18])):
+                print(f"  {i+1}. {name}: {value}")
+
         print(f"{'='*60}\n")
-        
-        # Calculate severity
-        severity = calculate_severity(data)
-        
+
         # Send Telegram alert for genuine earthquakes or uncertain high-magnitude events
         telegram_sent = False
         if ai_result['classification'] == 'genuine_earthquake' and ai_result['confidence'] > 0.7:
             telegram_results = send_telegram_alert(data, severity, ai_result)
             telegram_sent = any(success for _, success, _ in telegram_results)
-            print(f"📱 Telegram alert sent to {len(telegram_results)} recipient(s)")
+            print(f"[TELEGRAM] Alert sent to {len(telegram_results)} recipient(s)")
         elif ai_result['classification'] == 'uncertain' and data['horizontal_accel'] > 3.0:
             # Send alert for uncertain but high acceleration events
             telegram_results = send_telegram_alert(data, severity, ai_result)
             telegram_sent = any(success for _, success, _ in telegram_results)
-            print(f"📱 Telegram alert sent (uncertain high magnitude)")
+            print(f"[TELEGRAM] Alert sent (uncertain high magnitude)")
         else:
-            print(f"📱 Telegram alert NOT sent (classification: {ai_result['classification']})")
+            print(f"[TELEGRAM] Alert NOT sent (classification: {ai_result['classification']})")
         
         return jsonify({
             'status': 'success',
@@ -429,7 +513,7 @@ def receive_seismic_event():
             'ai_analysis': ai_result,
             'severity': severity,
             'telegram_sent': telegram_sent,
-            'event_id': len(ALERT_HISTORY)
+            'event_id': event_id
         }), 200
         
     except Exception as e:
@@ -441,11 +525,24 @@ def receive_seismic_event():
 def get_events():
     """Get recent seismic events"""
     limit = request.args.get('limit', 50, type=int)
+    offset = request.args.get('offset', 0, type=int)
 
-    # Get events from history (most recent first)
-    events = list(ALERT_HISTORY)[-limit:]
-    # Reverse to show most recent first
-    events.reverse()
+    # Get events from database or fallback to in-memory
+    if db:
+        try:
+            events = db.get_recent_events(limit=limit, offset=offset)
+        except Exception as db_error:
+            print(f"[WARNING] Database query failed: {db_error}")
+            # Fallback to in-memory if available
+            if 'ALERT_HISTORY' in globals():
+                events = list(ALERT_HISTORY)[-limit:]
+                events.reverse()
+            else:
+                events = []
+    else:
+        # Using in-memory storage
+        events = list(ALERT_HISTORY)[-limit:]
+        events.reverse()
 
     return jsonify({
         'total': len(events),
@@ -590,6 +687,54 @@ def send_custom_telegram():
 
     except Exception as e:
         print(f"Error sending custom Telegram message: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/statistics', methods=['GET'])
+def get_statistics():
+    """
+    Get aggregate statistics for dashboard
+
+    Returns:
+        - total: Total number of events
+        - today: Events detected today
+        - false_alarms: Number of false alarms
+        - accuracy: AI accuracy percentage
+    """
+    try:
+        if db:
+            # Get statistics from database
+            stats = db.get_aggregate_statistics()
+        else:
+            # Fallback to in-memory calculations
+            if 'ALERT_HISTORY' in globals():
+                events = list(ALERT_HISTORY)
+                total = len(events)
+
+                # Today's events
+                today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                today = sum(1 for e in events
+                           if datetime.fromisoformat(e.get('server_timestamp', e.get('timestamp'))) >= today_start)
+
+                # False alarms
+                false_alarms = sum(1 for e in events if e.get('ai_classification') == 'false_alarm')
+
+                # Accuracy
+                accuracy = ((total - false_alarms) / total * 100) if total > 0 else 0
+
+                stats = {
+                    'total': total,
+                    'today': today,
+                    'false_alarms': false_alarms,
+                    'accuracy': round(accuracy, 1)
+                }
+            else:
+                stats = {'total': 0, 'today': 0, 'false_alarms': 0, 'accuracy': 0}
+
+        return jsonify(stats)
+
+    except Exception as e:
+        print(f"Error getting statistics: {e}")
         return jsonify({'error': str(e)}), 500
 
 

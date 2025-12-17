@@ -16,13 +16,20 @@ import joblib
 import numpy as np
 from sklearn.ensemble import IsolationForest
 from sklearn.model_selection import cross_val_score
+from sklearn.metrics import precision_score, recall_score, f1_score, confusion_matrix
 import os
 from datetime import datetime
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
 
 
 class SeismicModelTrainer:
     """
     Trainer for the seismic AI classification model
+    Uses 18-feature extraction for enhanced accuracy
     """
 
     def __init__(self):
@@ -30,70 +37,112 @@ class SeismicModelTrainer:
         self.training_data = []
         self.labels = []
 
+        # Import FeatureExtractor for 18-feature support
+        try:
+            from ml.feature_extractor import FeatureExtractor
+            self.feature_extractor = FeatureExtractor()
+            self.use_18_features = True
+            print("[OK] Using 18-feature extraction for enhanced accuracy")
+        except ImportError:
+            print("[WARNING] FeatureExtractor not found, falling back to 6 basic features")
+            self.feature_extractor = None
+            self.use_18_features = False
+
     def load_training_data(self, filepath):
         """
         Load training data from JSON file
 
-        Expected format:
-        [
-            {
-                "horizontal_accel": 2.5,
-                "total_accel": 3.1,
-                "sound_level": 1500,
-                "sound_correlated": false,
-                "label": "genuine"  // or "false_alarm"
-            },
-            ...
-        ]
+        Supports two formats:
+        1. Array of samples: [{...}, {...}]
+        2. Metadata wrapper: {"metadata": {...}, "samples": [{...}, {...}]}
         """
         try:
             with open(filepath, 'r') as f:
                 data = json.load(f)
 
-            print(f"✓ Loaded {len(data)} training samples from {filepath}")
+            # Handle metadata wrapper format (from data collection scripts)
+            if isinstance(data, dict) and 'samples' in data:
+                samples = data['samples']
+                if 'metadata' in data:
+                    print(f"[METADATA] Source: {data['metadata'].get('source', 'unknown')}")
+                    print(f"[METADATA] Sample count: {data['metadata'].get('sample_count', len(samples))}")
+            else:
+                # Handle plain array format
+                samples = data if isinstance(data, list) else []
 
-            for sample in data:
+            print(f"[OK] Loaded {len(samples)} training samples from {filepath}")
+
+            skipped = 0
+            for sample in samples:
+                # Extract features (18 or 6 depending on availability)
                 features = self.extract_features(sample)
+
+                if features is None:
+                    skipped += 1
+                    continue
+
                 self.training_data.append(features)
 
                 # Convert label to numeric: -1 for genuine, 1 for false alarm
-                label = -1 if sample['label'] == 'genuine' else 1
+                label = -1 if sample.get('label') == 'genuine' else 1
                 self.labels.append(label)
+
+            if skipped > 0:
+                print(f"[WARNING] Skipped {skipped} samples due to missing features")
+
+            print(f"[OK] Processed {len(self.training_data)} valid samples")
 
             return True
 
         except FileNotFoundError:
-            print(f"✗ Error: File {filepath} not found")
+            print(f"[ERROR] File {filepath} not found")
             return False
         except json.JSONDecodeError:
-            print(f"✗ Error: Invalid JSON in {filepath}")
+            print(f"[ERROR] Invalid JSON in {filepath}")
             return False
         except Exception as e:
-            print(f"✗ Error loading data: {e}")
+            print(f"[ERROR] Loading data failed: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def extract_features(self, event_data):
         """
         Extract features from a seismic event
+        Uses 18 features if FeatureExtractor available, otherwise 6 basic features
         """
-        horizontal_accel = event_data.get('horizontal_accel', 0)
-        total_accel = event_data.get('total_accel', 0)
-        sound_level = event_data.get('sound_level', 0)
-        sound_correlated = 1 if event_data.get('sound_correlated', False) else 0
+        if self.use_18_features and self.feature_extractor:
+            # Use advanced 18-feature extraction
+            try:
+                features = self.feature_extractor.extract_all_features(event_data)
+                return features.tolist() if hasattr(features, 'tolist') else list(features)
+            except Exception as e:
+                print(f"[WARNING] 18-feature extraction failed: {e}, falling back to 6 features")
+                # Fall through to basic extraction
 
-        # Calculate acceleration to sound ratio
-        accel_sound_ratio = horizontal_accel / max(sound_level, 1)
+        # Basic 6-feature extraction (fallback)
+        try:
+            horizontal_accel = event_data.get('horizontal_accel', 0)
+            total_accel = event_data.get('total_accel', 0)
+            sound_level = event_data.get('sound_level', 0)
+            sound_correlated = 1 if event_data.get('sound_correlated', False) else 0
 
-        features = [
-            horizontal_accel,
-            total_accel,
-            sound_level,
-            accel_sound_ratio,
-            sound_correlated,
-            0  # Rate of change (placeholder for first sample)
-        ]
+            # Calculate acceleration to sound ratio
+            accel_sound_ratio = horizontal_accel / max(sound_level, 1)
 
-        return features
+            features = [
+                horizontal_accel,
+                total_accel,
+                sound_level,
+                accel_sound_ratio,
+                sound_correlated,
+                0  # Rate of change (placeholder for first sample)
+            ]
+
+            return features
+        except Exception as e:
+            print(f"[ERROR] Feature extraction failed: {e}")
+            return None
 
     def train_model(self, contamination=0.1, n_estimators=100):
         """
@@ -104,11 +153,14 @@ class SeismicModelTrainer:
             n_estimators: Number of trees in the forest
         """
         if len(self.training_data) < 10:
-            print("✗ Error: Need at least 10 training samples")
+            print("[ERROR] Need at least 10 training samples")
             return False
 
-        print(f"\n🤖 Training AI Model...")
+        num_features = len(self.training_data[0]) if self.training_data else 0
+
+        print(f"\n[TRAIN] Training AI Model...")
         print(f"   Samples: {len(self.training_data)}")
+        print(f"   Features: {num_features} ({'18-feature enhanced model' if num_features > 10 else '6-feature basic model'})")
         print(f"   Contamination: {contamination}")
         print(f"   Estimators: {n_estimators}")
 
@@ -123,18 +175,21 @@ class SeismicModelTrainer:
 
         # Evaluate using cross-validation (if enough samples)
         if len(self.training_data) >= 20:
-            scores = cross_val_score(self.model, self.training_data, cv=3, scoring='accuracy')
-            print(f"   Cross-validation accuracy: {scores.mean():.2%} (+/- {scores.std():.2%})")
+            try:
+                scores = cross_val_score(self.model, self.training_data, cv=min(3, len(self.training_data) // 10), scoring='accuracy')
+                print(f"   Cross-validation accuracy: {scores.mean():.2%} (+/- {scores.std():.2%})")
+            except Exception as e:
+                print(f"[WARNING] Cross-validation failed: {e}")
 
-        print("✓ Model training complete")
+        print("[OK] Model training complete")
         return True
 
     def evaluate_model(self):
         """
-        Evaluate the model on training data
+        Evaluate the model on training data with comprehensive metrics
         """
         if self.model is None:
-            print("✗ Error: Model not trained yet")
+            print("[ERROR] Model not trained yet")
             return
 
         predictions = self.model.predict(self.training_data)
@@ -144,31 +199,82 @@ class SeismicModelTrainer:
         correct = sum(1 for pred, label in zip(predictions, self.labels) if pred == label)
         accuracy = correct / len(predictions)
 
+        # Calculate precision, recall, F1-score
+        # Note: -1 = genuine (positive class), 1 = false alarm (negative class)
+        try:
+            precision = precision_score(self.labels, predictions, pos_label=-1, zero_division=0)
+            recall = recall_score(self.labels, predictions, pos_label=-1, zero_division=0)
+            f1 = f1_score(self.labels, predictions, pos_label=-1, zero_division=0)
+
+            # Confusion matrix
+            cm = confusion_matrix(self.labels, predictions, labels=[-1, 1])
+            true_positive = cm[0][0]  # Genuine predicted as genuine
+            false_negative = cm[0][1]  # Genuine predicted as false alarm
+            false_positive = cm[1][0]  # False alarm predicted as genuine
+            true_negative = cm[1][1]  # False alarm predicted as false alarm
+
+        except Exception as e:
+            print(f"[WARNING] Could not calculate metrics: {e}")
+            precision = recall = f1 = 0
+            true_positive = false_negative = false_positive = true_negative = 0
+
         # Count genuine vs false alarms
         genuine_count = sum(1 for label in self.labels if label == -1)
         false_alarm_count = len(self.labels) - genuine_count
 
-        print(f"\n📊 Model Evaluation:")
+        print(f"\n{'='*60}")
+        print("MODEL EVALUATION RESULTS")
+        print(f"{'='*60}")
+
+        print(f"\n[DATASET]")
         print(f"   Total Samples: {len(self.training_data)}")
-        print(f"   Genuine Earthquakes: {genuine_count}")
-        print(f"   False Alarms: {false_alarm_count}")
-        print(f"   Training Accuracy: {accuracy:.2%}")
+        print(f"   Genuine Earthquakes: {genuine_count} ({100*genuine_count/len(self.labels):.1f}%)")
+        print(f"   False Alarms: {false_alarm_count} ({100*false_alarm_count/len(self.labels):.1f}%)")
+
+        print(f"\n[PERFORMANCE METRICS]")
+        print(f"   Accuracy:  {accuracy:.2%}")
+        print(f"   Precision: {precision:.2%}  (of predicted genuine, how many are actually genuine)")
+        print(f"   Recall:    {recall:.2%}  (of actual genuine, how many were detected)")
+        print(f"   F1-Score:  {f1:.2%}  (harmonic mean of precision and recall)")
+
+        print(f"\n[CONFUSION MATRIX]")
+        print(f"                    Predicted Genuine    Predicted False Alarm")
+        print(f"   Actual Genuine:        {true_positive:5}                  {false_negative:5}")
+        print(f"   Actual False:          {false_positive:5}                  {true_negative:5}")
+
+        # Interpretation
+        print(f"\n[INTERPRETATION]")
+        if accuracy >= 0.90:
+            print(f"   [EXCELLENT] Model achieves >90% accuracy")
+        elif accuracy >= 0.80:
+            print(f"   [GOOD] Model achieves 80-90% accuracy")
+        elif accuracy >= 0.70:
+            print(f"   [FAIR] Model achieves 70-80% accuracy")
+        else:
+            print(f"   [POOR] Model accuracy <70%, needs more training data")
+
+        if false_positive > 0:
+            print(f"   [WARNING] {false_positive} false alarms incorrectly classified as genuine")
+        if false_negative > 0:
+            print(f"   [WARNING] {false_negative} genuine earthquakes missed")
 
         # Show some example predictions
-        print(f"\n🔍 Sample Predictions:")
+        print(f"\n[SAMPLE PREDICTIONS]")
         for i in range(min(5, len(self.training_data))):
             pred_label = "genuine" if predictions[i] == -1 else "false_alarm"
             actual_label = "genuine" if self.labels[i] == -1 else "false_alarm"
             confidence = abs(scores[i])
-            match = "✓" if predictions[i] == self.labels[i] else "✗"
+            match = "[OK]" if predictions[i] == self.labels[i] else "[MISS]"
             print(f"   {match} Predicted: {pred_label:12} | Actual: {actual_label:12} | Confidence: {confidence:.3f}")
+
+        print(f"\n{'='*60}")
 
     def save_model(self, filepath='models/seismic_model.pkl'):
         """
         Save the trained model to disk
         """
         if self.model is None:
-            print("✗ Error: No model to save")
+            print("[ERROR] No model to save")
             return False
 
         try:
@@ -176,25 +282,37 @@ class SeismicModelTrainer:
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
             joblib.dump(self.model, filepath)
-            print(f"✓ Model saved to {filepath}")
+            print(f"[OK] Model saved to {filepath}")
+
+            # Calculate evaluation metrics for metadata
+            predictions = self.model.predict(self.training_data)
+            correct = sum(1 for pred, label in zip(predictions, self.labels) if pred == label)
+            accuracy = correct / len(predictions)
 
             # Save metadata
+            num_features = len(self.training_data[0]) if self.training_data else 0
+
             metadata = {
                 'trained_at': datetime.now().isoformat(),
                 'num_samples': len(self.training_data),
+                'num_features': num_features,
+                'model_type': '18-feature enhanced' if num_features > 10 else '6-feature basic',
                 'genuine_count': sum(1 for label in self.labels if label == -1),
-                'false_alarm_count': sum(1 for label in self.labels if label == 1)
+                'false_alarm_count': sum(1 for label in self.labels if label == 1),
+                'training_accuracy': round(accuracy, 4),
+                'sklearn_version': '1.5+',
+                'algorithm': 'IsolationForest'
             }
 
             metadata_path = filepath.replace('.pkl', '_metadata.json')
             with open(metadata_path, 'w') as f:
                 json.dump(metadata, f, indent=2)
-            print(f"✓ Metadata saved to {metadata_path}")
+            print(f"[OK] Metadata saved to {metadata_path}")
 
             return True
 
         except Exception as e:
-            print(f"✗ Error saving model: {e}")
+            print(f"[ERROR] Saving model failed: {e}")
             return False
 
     def interactive_training(self):
@@ -224,7 +342,7 @@ class SeismicModelTrainer:
                 label = input("  Label (genuine/false): ").strip().lower()
 
                 if label not in ['genuine', 'false']:
-                    print("  ✗ Invalid label. Use 'genuine' or 'false'")
+                    print("  [ERROR] Invalid label. Use 'genuine' or 'false'")
                     continue
 
                 # Create event data
@@ -242,19 +360,19 @@ class SeismicModelTrainer:
                 self.labels.append(-1 if label == 'genuine' else 1)
 
                 sample_count += 1
-                print(f"  ✓ Sample added ({sample_count} total)")
+                print(f"  [OK] Sample added ({sample_count} total)")
 
             except ValueError:
-                print("  ✗ Invalid input. Please enter numeric values.")
+                print("  [ERROR] Invalid input. Please enter numeric values.")
             except KeyboardInterrupt:
                 print("\n\n  Training interrupted.")
                 break
 
         if sample_count > 0:
-            print(f"\n✓ Collected {sample_count} training samples")
+            print(f"\n[OK] Collected {sample_count} training samples")
             return True
         else:
-            print("\n✗ No samples collected")
+            print("\n[ERROR] No samples collected")
             return False
 
 
@@ -280,11 +398,11 @@ def main():
     elif args.data:
         success = trainer.load_training_data(args.data)
     else:
-        print("✗ Error: Must specify either --data or --interactive")
+        print("[ERROR] Must specify either --data or --interactive")
         return
 
     if not success:
-        print("\n✗ Training failed - no data loaded")
+        print("\n[ERROR] Training failed - no data loaded")
         return
 
     # Train the model
@@ -296,7 +414,7 @@ def main():
         trainer.save_model(args.output)
 
         print("\n" + "="*60)
-        print("✓ Training Complete!")
+        print("[SUCCESS] Training Complete!")
         print("="*60)
         print(f"\nYou can now use the trained model in your QuakeSense backend.")
         print(f"The model will be automatically loaded on server startup.\n")

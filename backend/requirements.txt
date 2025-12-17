@@ -10,12 +10,15 @@ joblib>=1.4.2
 # HTTP Requests
 requests>=2.32.0
 
-# Optional: Database support
-# psycopg2-binary>=2.9.9  # PostgreSQL
-# pymongo>=4.9.0  # MongoDB
+# Database support
+psycopg2-binary>=2.9.9  # PostgreSQL driver
+# sqlite3 is included with Python
 
-# Optional: Enhanced features
-# These require new versions for Python 3.13 compatibility
-pandas>=2.2.3
-matplotlib>=3.9.2
-scipy>=1.14.1
+# Data processing and analysis
+pandas>=2.2.3  # Data manipulation
+scipy>=1.14.1  # Scientific computing (FFT for frequency analysis)
+matplotlib>=3.9.2  # Plotting and visualization
+
+# Web scraping (for PHIVOLCS data collection)
+beautifulsoup4>=4.12.0  # HTML parsing
+lxml>=5.0.0  # XML/HTML parser (faster than html.parser)
