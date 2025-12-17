@@ -1,0 +1,82 @@
+[
+  {
+    "horizontal_accel": 5.2,
+    "total_accel": 6.1,
+    "sound_level": 1200,
+    "sound_correlated": false,
+    "label": "genuine",
+    "notes": "Strong earthquake, no sound correlation"
+  },
+  {
+    "horizontal_accel": 3.8,
+    "total_accel": 4.2,
+    "sound_level": 1400,
+    "sound_correlated": false,
+    "label": "genuine",
+    "notes": "Moderate earthquake"
+  },
+  {
+    "horizontal_accel": 2.1,
+    "total_accel": 2.5,
+    "sound_level": 3500,
+    "sound_correlated": true,
+    "label": "false_alarm",
+    "notes": "Door slam - high sound correlation"
+  },
+  {
+    "horizontal_accel": 1.5,
+    "total_accel": 2.0,
+    "sound_level": 3200,
+    "sound_correlated": true,
+    "label": "false_alarm",
+    "notes": "Heavy footsteps"
+  },
+  {
+    "horizontal_accel": 4.5,
+    "total_accel": 5.3,
+    "sound_level": 1100,
+    "sound_correlated": false,
+    "label": "genuine",
+    "notes": "Strong seismic activity"
+  },
+  {
+    "horizontal_accel": 1.8,
+    "total_accel": 2.2,
+    "sound_level": 2800,
+    "sound_correlated": true,
+    "label": "false_alarm",
+    "notes": "Object dropped nearby"
+  },
+  {
+    "horizontal_accel": 6.1,
+    "total_accel": 7.2,
+    "sound_level": 1050,
+    "sound_correlated": false,
+    "label": "genuine",
+    "notes": "Major earthquake event"
+  },
+  {
+    "horizontal_accel": 2.3,
+    "total_accel": 2.8,
+    "sound_level": 3100,
+    "sound_correlated": true,
+    "label": "false_alarm",
+    "notes": "Truck passing by"
+  },
+  {
+    "horizontal_accel": 3.2,
+    "total_accel": 3.9,
+    "sound_level": 1300,
+    "sound_correlated": false,
+    "label": "genuine",
+    "notes": "Earthquake with low sound"
+  },
+  {
+    "horizontal_accel": 1.2,
+    "total_accel": 1.6,
+    "sound_level": 3800,
+    "sound_correlated": true,
+    "label": "false_alarm",
+    "notes": "Construction noise"
+  }
+]
