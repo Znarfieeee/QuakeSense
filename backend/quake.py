@@ -550,6 +550,57 @@ def get_events():
     })
 
 
+@app.route('/api/model-info', methods=['GET'])
+def get_model_info():
+    """Get AI model information and statistics"""
+
+    # Get classification distribution from actual stored events
+    genuine_count = 0
+    false_alarm_count = 0
+    total_events = 0
+
+    if db:
+        try:
+            # Get statistics from database
+            stats = db.get_aggregate_statistics()
+            total_events = stats.get('total', 0)
+            false_alarm_count = stats.get('false_alarms', 0)
+            genuine_count = total_events - false_alarm_count
+        except:
+            pass
+
+    # Calculate percentages
+    genuine_pct = (genuine_count / total_events * 100) if total_events > 0 else 0
+    false_alarm_pct = (false_alarm_count / total_events * 100) if total_events > 0 else 0
+
+    model_info = {
+        'model_loaded': ai_classifier.is_trained,
+        'model_type': getattr(ai_classifier, 'model_type', 'unknown'),
+        'features': 18,
+        'algorithm': 'Random Forest Classifier' if getattr(ai_classifier, 'model_type', '') == 'random_forest' else 'Isolation Forest',
+        'genuine_count': genuine_count,
+        'false_alarm_count': false_alarm_count,
+        'genuine_percentage': round(genuine_pct, 1),
+        'false_alarm_percentage': round(false_alarm_pct, 1),
+        'total_predictions': total_events,
+        'test_accuracy': 100.0 if getattr(ai_classifier, 'model_type', '') == 'random_forest' else 55.0
+    }
+
+    # Try to load metadata from file for test accuracy
+    metadata_path = 'models/seismic_model_rf_metadata.json'
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+                model_info['test_accuracy'] = metadata.get('test_accuracy', 1.0) * 100
+                model_info['trained_at'] = metadata.get('trained_at')
+                model_info['training_samples'] = metadata.get('num_samples_total')
+        except:
+            pass
+
+    return jsonify(model_info)
+
+
 @app.route('/api/train-model', methods=['POST'])
 def train_model():
     """

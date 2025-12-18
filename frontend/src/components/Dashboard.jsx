@@ -6,7 +6,7 @@ import EarthquakeTable from './EarthquakeTable';
 import { AlertTriangle, Activity, Shield, TrendingUp } from 'lucide-react';
 
 // Backend API configuration
-const API_BASE_URL = 'http://192.168.1.31:5000/api';
+const API_BASE_URL = 'http://10.155.94.85:5000/api';
 
 export default function Dashboard() {
   const [earthquakeData, setEarthquakeData] = useState([]);
@@ -15,6 +15,11 @@ export default function Dashboard() {
     today: 0,
     falseAlarms: 0,
     accuracy: 0
+  });
+  const [modelInfo, setModelInfo] = useState({
+    algorithm: 'Loading...',
+    test_accuracy: 0,
+    model_type: 'unknown'
   });
   const [activeAlert, setActiveAlert] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -88,10 +93,25 @@ export default function Dashboard() {
     }
   };
 
+  // Fetch model information
+  const fetchModelInfo = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/model-info`);
+      if (response.ok) {
+        const data = await response.json();
+        console.log('🤖 Model info:', data);
+        setModelInfo(data);
+      }
+    } catch (error) {
+      console.error('Error fetching model info:', error);
+    }
+  };
+
   // Initial data load and polling
   useEffect(() => {
     // Fetch immediately
     fetchEarthquakeData();
+    fetchModelInfo();
 
     // Poll every 5 seconds for real-time updates
     const pollInterval = setInterval(fetchEarthquakeData, 5000);
@@ -157,8 +177,10 @@ export default function Dashboard() {
         />
         <StatCard
           icon={<Shield className="w-6 h-6" />}
-          title="AI Accuracy"
-          value={`${stats.accuracy}%`}
+          title="AI Classifications"
+          value={`${modelInfo.genuine_count || 0} / ${modelInfo.false_alarm_count || 0}`}
+          subtitle={`Genuine / False Alarms (${modelInfo.total_predictions || 0} total)`}
+          badge={modelInfo.model_type === 'random_forest' ? '18-Feature RF' : 'IF'}
           color="purple"
         />
       </div>
@@ -207,7 +229,7 @@ export default function Dashboard() {
   );
 }
 
-function StatCard({ icon, title, value, color }) {
+function StatCard({ icon, title, value, color, subtitle, badge }) {
   const colorClasses = {
     blue: 'from-blue-500/20 to-blue-600/20 border-blue-500/30',
     green: 'from-green-500/20 to-green-600/20 border-green-500/30',
@@ -219,9 +241,17 @@ function StatCard({ icon, title, value, color }) {
     <div className={`bg-gradient-to-br ${colorClasses[color]} border rounded-xl p-6 backdrop-blur-sm`}>
       <div className="flex items-center justify-between mb-2">
         <div className="text-slate-300">{icon}</div>
+        {badge && (
+          <span className="px-2 py-1 text-xs font-semibold bg-purple-500/30 text-purple-300 rounded-full border border-purple-500/50">
+            {badge}
+          </span>
+        )}
       </div>
       <div className="text-3xl font-bold mb-1">{value}</div>
       <div className="text-sm text-slate-400">{title}</div>
+      {subtitle && (
+        <div className="text-xs text-slate-500 mt-1">{subtitle}</div>
+      )}
     </div>
   );
 }

@@ -350,36 +350,46 @@ class DatabaseManager:
         Returns:
             List of event dictionaries
         """
-        if self.db_type == 'postgresql':
-            sql = """
-            SELECT * FROM seismic_events
-            ORDER BY timestamp DESC
-            LIMIT %s OFFSET %s
-            """
-            self.cursor.execute(sql, (limit, offset))
-        else:
-            sql = """
-            SELECT * FROM seismic_events
-            ORDER BY timestamp DESC
-            LIMIT ? OFFSET ?
-            """
-            self.cursor.execute(sql, (limit, offset))
+        # Create a new cursor for this query to avoid recursive cursor issues
+        cursor = self.connection.cursor()
 
-        rows = self.cursor.fetchall()
+        try:
+            if self.db_type == 'postgresql':
+                sql = """
+                SELECT * FROM seismic_events
+                ORDER BY timestamp DESC
+                LIMIT %s OFFSET %s
+                """
+                cursor.execute(sql, (limit, offset))
+            else:
+                sql = """
+                SELECT * FROM seismic_events
+                ORDER BY timestamp DESC
+                LIMIT ? OFFSET ?
+                """
+                cursor.execute(sql, (limit, offset))
 
-        # Convert to list of dicts
-        events = []
-        for row in rows:
-            event = dict(row)
-            # Convert boolean fields for SQLite
-            if self.db_type == 'sqlite':
-                event['sound_correlated'] = bool(event.get('sound_correlated', 0))
-                event['p_wave_detected'] = bool(event.get('p_wave_detected', 0))
-                event['s_wave_detected'] = bool(event.get('s_wave_detected', 0))
-                event['telegram_sent'] = bool(event.get('telegram_sent', 0))
-            events.append(event)
+            rows = cursor.fetchall()
 
-        return events
+            # Convert to list of dicts
+            events = []
+            for row in rows:
+                event = dict(row)
+                # Convert boolean fields for SQLite
+                if self.db_type == 'sqlite':
+                    event['sound_correlated'] = bool(event.get('sound_correlated', 0))
+                    event['p_wave_detected'] = bool(event.get('p_wave_detected', 0))
+                    event['s_wave_detected'] = bool(event.get('s_wave_detected', 0))
+                    event['telegram_sent'] = bool(event.get('telegram_sent', 0))
+
+                # Frontend expects 'server_timestamp' - alias timestamp field
+                event['server_timestamp'] = event.get('timestamp')
+
+                events.append(event)
+
+            return events
+        finally:
+            cursor.close()
 
     def get_aggregate_statistics(self) -> Dict:
         """
@@ -388,46 +398,52 @@ class DatabaseManager:
         Returns:
             Dictionary with stats (total, today, false_alarms, accuracy)
         """
-        # Total events
-        self.cursor.execute("SELECT COUNT(*) as count FROM seismic_events")
-        total = self.cursor.fetchone()['count']
+        # Create a new cursor for this query to avoid recursive cursor issues
+        cursor = self.connection.cursor()
 
-        # Today's events
-        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        if self.db_type == 'postgresql':
-            self.cursor.execute(
-                "SELECT COUNT(*) as count FROM seismic_events WHERE timestamp >= %s",
-                (today_start,)
-            )
-        else:
-            self.cursor.execute(
-                "SELECT COUNT(*) as count FROM seismic_events WHERE timestamp >= ?",
-                (today_start,)
-            )
-        today = self.cursor.fetchone()['count']
+        try:
+            # Total events
+            cursor.execute("SELECT COUNT(*) as count FROM seismic_events")
+            total = cursor.fetchone()['count']
 
-        # False alarms
-        if self.db_type == 'postgresql':
-            self.cursor.execute(
-                "SELECT COUNT(*) as count FROM seismic_events WHERE ai_classification = %s",
-                ('false_alarm',)
-            )
-        else:
-            self.cursor.execute(
-                "SELECT COUNT(*) as count FROM seismic_events WHERE ai_classification = ?",
-                ('false_alarm',)
-            )
-        false_alarms = self.cursor.fetchone()['count']
+            # Today's events
+            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+            if self.db_type == 'postgresql':
+                cursor.execute(
+                    "SELECT COUNT(*) as count FROM seismic_events WHERE timestamp >= %s",
+                    (today_start,)
+                )
+            else:
+                cursor.execute(
+                    "SELECT COUNT(*) as count FROM seismic_events WHERE timestamp >= ?",
+                    (today_start,)
+                )
+            today = cursor.fetchone()['count']
 
-        # Calculate accuracy
-        accuracy = ((total - false_alarms) / total * 100) if total > 0 else 0
+            # False alarms
+            if self.db_type == 'postgresql':
+                cursor.execute(
+                    "SELECT COUNT(*) as count FROM seismic_events WHERE ai_classification = %s",
+                    ('false_alarm',)
+                )
+            else:
+                cursor.execute(
+                    "SELECT COUNT(*) as count FROM seismic_events WHERE ai_classification = ?",
+                    ('false_alarm',)
+                )
+            false_alarms = cursor.fetchone()['count']
 
-        return {
-            'total': total,
-            'today': today,
-            'false_alarms': false_alarms,
-            'accuracy': round(accuracy, 1)
-        }
+            # Calculate accuracy
+            accuracy = ((total - false_alarms) / total * 100) if total > 0 else 0
+
+            return {
+                'total': total,
+                'today': today,
+                'false_alarms': false_alarms,
+                'accuracy': round(accuracy, 1)
+            }
+        finally:
+            cursor.close()
 
     def get_events_by_date_range(self, start_date: str, end_date: str) -> List[Dict]:
         """
